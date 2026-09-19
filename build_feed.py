@@ -23,9 +23,9 @@ GOOGLE_CATEGORY = "356"  # Electronics > Print, Copy, Scan & Fax > Printer, Copi
 
 PRINTER_KEYS = ["compatible_printer_collections"] + [f"compatible_printer_collections_{i}" for i in range(2, 9)]
 COLUMNS = [
-    "id", "title", "description", "link", "image_link", "availability", "price", "brand", "mpn",
-    "identifier_exists", "condition", "item_group_id", "google_product_category", "product_type",
-    "custom_label_0", "custom_label_1",
+    "id", "title", "description", "link", "image_link", "availability", "price", "brand", "mpn", "gtin",
+    "identifier_exists", "condition", "is_bundle", "item_group_id", "google_product_category", "product_type",
+    "custom_label_0", "custom_label_1", "custom_label_2",
 ]
 
 
@@ -162,6 +162,19 @@ def tag_value(tags, prefix):
     return ""
 
 
+def brand_name(slug):
+    return {"hp": "HP", "oki": "OKI"}.get(slug, slug.replace("-", " ").title())
+
+
+def valid_gtin(code):
+    code = re.sub(r"\s+", "", code or "")
+    if not code.isdigit() or len(code) not in (8, 12, 13, 14):
+        return ""
+    digits = [int(c) for c in code]
+    total = sum(d * (3 if i % 2 == 0 else 1) for i, d in enumerate(reversed(digits[:-1])))
+    return code if (10 - total % 10) % 10 == digits[-1] else ""
+
+
 def build_rows(product_lines, collection_lines):
     printers_by_gid = {
         c["id"]: (clean(c["title"]), c["handle"])
@@ -175,7 +188,7 @@ def build_rows(product_lines, collection_lines):
         else:
             products.append(line)
 
-    rows, stats = [], {"products": 0, "printer_rows": 0, "skipped_no_image": 0, "skipped_long_title": 0, "skipped_missing_printer": 0}
+    rows, stats = [], {"products": 0, "printer_rows": 0, "skipped_no_image": 0, "skipped_long_title": 0, "skipped_missing_printer": 0, "invalid_gtin": 0}
     for p in products:
         if not p.get("publishedOnPublication"):
             continue
@@ -209,7 +222,11 @@ def build_rows(product_lines, collection_lines):
         description = clean(p["description"]) or title
         mpn = clean((p.get("mpn") or {}).get("value"))
         tags = p.get("tags") or []
-        product_type = {"toner": "Toner Cartridges", "ink": "Ink Cartridges"}.get(tag_value(tags, "type-"), "")
+        brand_slug = tag_value(tags, "brand-")
+        cartridge_brand = brand_name(brand_slug) if brand_slug else ""
+        product_type_root = {"toner": "Toner Cartridges", "ink": "Ink Cartridges"}.get(tag_value(tags, "type-"), "")
+        product_type = " > ".join(x for x in (product_type_root, cartridge_brand) if x)
+        remanufactured = title.casefold().startswith("remanufactured")
         multi = len(pvars) > 1
         group_id = make_id(pvars[0].get("sku") or numeric_id(p["id"]))
 
@@ -218,18 +235,24 @@ def build_rows(product_lines, collection_lines):
             in_stock = (v.get("inventoryQuantity") or 0) > 0 or v.get("inventoryPolicy") == "CONTINUE"
             base_link = f"{SITE}/products/{p['handle']}"
             query = [f"variant={numeric_id(v['id'])}"] if multi else []
+            gtin = valid_gtin(v.get("barcode"))
+            if v.get("barcode") and not gtin:
+                stats["invalid_gtin"] += 1
             common = {
                 "image_link": image["url"],
                 "availability": "in stock" if in_stock else "out of stock",
                 "price": f"{float(v['price']):.2f} {CURRENCY}",
                 "brand": BRAND,
                 "mpn": mpn,
-                "identifier_exists": "" if (mpn or v.get("barcode")) else "no",
-                "condition": "new",
+                "gtin": gtin,
+                "identifier_exists": "" if (mpn or gtin) else "no",
+                "condition": "refurbished" if remanufactured else "new",
+                "is_bundle": "yes" if re.search(r"multi-?\s?pack", title, re.I) else "",
                 "item_group_id": group_id,
                 "google_product_category": GOOGLE_CATEGORY,
                 "product_type": product_type,
-                "custom_label_0": tag_value(tags, "brand-"),
+                "custom_label_0": brand_slug,
+                "custom_label_2": "remanufactured" if remanufactured else "compatible",
             }
             rows.append({
                 **common, "id": sku, "title": title, "description": description[:5000],
@@ -241,8 +264,10 @@ def build_rows(product_lines, collection_lines):
                 if not ptitle:
                     stats["skipped_long_title"] += 1
                     continue
+                short_name = name[len(cartridge_brand):].strip() if cartridge_brand and name.casefold().startswith(cartridge_brand.casefold() + " ") else name
                 rows.append({
                     **common, "id": make_id(sku, coll_id), "title": ptitle,
+                    "product_type": f"{product_type} > {short_name}" if product_type else short_name,
                     "description": f"Compatible with {name}. {description}"[:5000],
                     "link": base_link + "?" + "&".join(query + [f"printer={urllib.parse.quote(handle)}"]),
                     "custom_label_1": "printer",
