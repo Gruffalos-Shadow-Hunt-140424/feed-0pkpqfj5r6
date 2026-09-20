@@ -11,6 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 SHOP = os.environ.get("SHOPIFY_SHOP", "")
 SITE = os.environ.get("SITE_URL", "https://myinktoner.co.uk").rstrip("/")
@@ -383,6 +384,13 @@ def find_problems(rows, stats, previous):
     return problems
 
 
+def london_time(moment):
+    try:
+        return moment.astimezone(ZoneInfo("Europe/London")).strftime("%d %b %Y, %H:%M %Z")
+    except ZoneInfoNotFoundError:
+        return moment.strftime("%d %b %Y, %H:%M UTC")
+
+
 def write_outputs(rows, stats):
     os.makedirs(OUT_DIR, exist_ok=True)
     with open(os.path.join(OUT_DIR, "feed.txt"), "w", encoding="utf-8", newline="") as f:
@@ -416,7 +424,7 @@ def write_outputs(rows, stats):
     else:
         attention = "<p>Nothing needs fixing: every printer title fits.</p>"
     now = datetime.now(timezone.utc)
-    built = now.strftime("%Y-%m-%d %H:%M UTC")
+    built = london_time(now)
     with open(os.path.join(OUT_DIR, "status.json"), "w", encoding="utf-8") as f:
         json.dump({"built": now.isoformat(), "rows": len(rows), "products": stats["products"], "printer_rows": stats["printer_rows"]}, f)
     run_link = (
