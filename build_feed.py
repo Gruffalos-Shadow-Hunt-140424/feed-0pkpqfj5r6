@@ -354,6 +354,7 @@ def build_rows(product_lines, collection_lines):
 
         for v in pvars:
             sku = make_id(v.get("sku") or numeric_id(v["id"]))
+            variant_mpn = mpn or (f"SET-{sku}" if is_multipack else "")
             in_stock = (v.get("inventoryQuantity") or 0) > 0 or v.get("inventoryPolicy") == "CONTINUE"
             base_link = f"{SITE}/products/{p['handle']}"
             query = [f"variant={numeric_id(v['id'])}"] if multi else []
@@ -366,9 +367,9 @@ def build_rows(product_lines, collection_lines):
                 "price": f"{float(v['price']):.2f} {CURRENCY}",
                 "brand": BRAND,
                 "color": color_value(colours),
-                "mpn": mpn,
+                "mpn": variant_mpn,
                 "gtin": gtin,
-                "identifier_exists": "" if (mpn or gtin) else "no",
+                "identifier_exists": "" if (variant_mpn or gtin) else "no",
                 "condition": "refurbished" if remanufactured else "new",
                 "is_bundle": "yes" if re.search(r"multi-?\s?pack", shop_title, re.I) else "",
                 "item_group_id": group_id,
