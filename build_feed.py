@@ -22,7 +22,18 @@ MIN_PRODUCTS = int(os.environ.get("MIN_PRODUCTS", "100"))
 MAX_DROP_PCT = float(os.environ.get("MAX_DROP_PCT", "20"))
 REPO = os.environ.get("GITHUB_REPOSITORY", "")
 CURRENCY = "GBP"
-GOOGLE_CATEGORY = "356"  # Electronics > Print, Copy, Scan & Fax > Printer, Copier & Fax Machine Accessories > Printer Consumables > Toner & Inkjet Cartridges
+# Google's official IDs, all under Electronics > Print, Copy, Scan & Fax > Printer, Copier & Fax Machine Accessories > Printer Consumables
+CATEGORY_CARTRIDGE = "356"    # Toner & Inkjet Cartridges
+CATEGORY_DRUM = "5259"        # Printer Drums & Drum Kits
+CATEGORY_MAINTENANCE = "5262"  # Printer Maintenance Kits
+CATEGORY_REFILL = "7362"      # Toner & Inkjet Cartridge Refills
+
+REFILL_RE = re.compile(r"\b(?:reload|refill)\s+kit\b", re.I)
+DRUM_RE = re.compile(r"\b(?:drum|imaging\s+unit|photoconductor|opc)\b", re.I)
+MAINTENANCE_RE = re.compile(
+    r"maintenance\s+(?:kit|box|unit)|\bfuser\b|transfer\s+(?:belt|roller|unit)|belt\s+unit|waste\s+(?:toner\s+)?(?:container|bottle|box|collector)", re.I
+)
+CARTRIDGE_RE = re.compile(r"\b(?:toner|ink)\s+cartridges?\b", re.I)
 
 PRINTER_KEYS = ["compatible_printer_collections"] + [f"compatible_printer_collections_{i}" for i in range(2, 9)]
 COLUMNS = [
@@ -125,6 +136,7 @@ def products_query(pub_id):
         "featuredMedia { preview { image { url } } } "
         'mpn: metafield(namespace: "custom", key: "mpn") { value } '
         'feed_title: metafield(namespace: "custom", key: "feed_title") { value } '
+        'consumable_type: metafield(namespace: "custom", key: "consumable_type") { value } '
         f"{printer_fields} "
         "variants { edges { node { id sku barcode price inventoryQuantity inventoryPolicy } } } } } } }"
     )
@@ -189,6 +201,17 @@ def shorten_printer_title(title, printer, brand):
             if fits(candidate, printer):
                 return f"{candidate} for {printer}"
     return None
+
+
+def classify(title, consumable_type):
+    """Returns (Google category ID, product type name or '' to use the ink/toner tag)."""
+    if REFILL_RE.search(title):
+        return CATEGORY_REFILL, "Toner Reload Kits"
+    if DRUM_RE.search(title):
+        return CATEGORY_DRUM, "Drum Units"
+    if (MAINTENANCE_RE.search(title) and not CARTRIDGE_RE.search(title)) or (consumable_type or "").casefold() == "maintenance":
+        return CATEGORY_MAINTENANCE, "Maintenance Kits"
+    return CATEGORY_CARTRIDGE, ""
 
 
 def tag_value(tags, prefix):
@@ -268,7 +291,8 @@ def build_rows(product_lines, collection_lines):
         tags = p.get("tags") or []
         brand_slug = tag_value(tags, "brand-")
         cartridge_brand = brand_name(brand_slug) if brand_slug else ""
-        product_type_root = {"toner": "Toner Cartridges", "ink": "Ink Cartridges"}.get(tag_value(tags, "type-"), "")
+        google_category, type_name = classify(shop_title, (p.get("consumable_type") or {}).get("value"))
+        product_type_root = type_name or {"toner": "Toner Cartridges", "ink": "Ink Cartridges"}.get(tag_value(tags, "type-"), "")
         product_type = " > ".join(x for x in (product_type_root, cartridge_brand) if x)
         remanufactured = shop_title.casefold().startswith("remanufactured")
         multi = len(pvars) > 1
@@ -293,7 +317,7 @@ def build_rows(product_lines, collection_lines):
                 "condition": "refurbished" if remanufactured else "new",
                 "is_bundle": "yes" if re.search(r"multi-?\s?pack", shop_title, re.I) else "",
                 "item_group_id": group_id,
-                "google_product_category": GOOGLE_CATEGORY,
+                "google_product_category": google_category,
                 "product_type": product_type,
                 "custom_label_0": brand_slug,
                 "custom_label_2": "remanufactured" if remanufactured else "compatible",
