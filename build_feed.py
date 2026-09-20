@@ -38,7 +38,7 @@ CARTRIDGE_RE = re.compile(r"\b(?:toner|ink)\s+cartridges?\b", re.I)
 
 PRINTER_KEYS = ["compatible_printer_collections"] + [f"compatible_printer_collections_{i}" for i in range(2, 9)]
 COLUMNS = [
-    "id", "title", "description", "link", "image_link", "availability", "price", "brand", "mpn", "gtin",
+    "id", "title", "description", "link", "image_link", "availability", "price", "brand", "color", "mpn", "gtin",
     "identifier_exists", "condition", "is_bundle", "item_group_id", "google_product_category", "product_type",
     "custom_label_0", "custom_label_1", "custom_label_2", "product_highlight",
 ]
@@ -217,6 +217,16 @@ def classify(title, consumable_type):
     return CATEGORY_CARTRIDGE, ""
 
 
+def color_value(colours):
+    """Google allows at most 3 real colours joined with '/'; anything more complex is left blank."""
+    expanded = []
+    for c in colours:
+        for part in (["cyan", "magenta", "yellow"] if c.casefold().startswith("tri") else [c.casefold()]):
+            if part not in expanded:
+                expanded.append(part)
+    return "/".join(x.title() for x in expanded) if 1 <= len(expanded) <= 3 else ""
+
+
 def yield_highlight(page_yield, colours):
     values = [v.strip() for v in (page_yield or "").split("|") if v.strip()]
     if not values:
@@ -355,6 +365,7 @@ def build_rows(product_lines, collection_lines):
                 "availability": "in stock" if in_stock else "out of stock",
                 "price": f"{float(v['price']):.2f} {CURRENCY}",
                 "brand": BRAND,
+                "color": color_value(colours),
                 "mpn": mpn,
                 "gtin": gtin,
                 "identifier_exists": "" if (mpn or gtin) else "no",
