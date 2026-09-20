@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Builds a Google Merchant Center feed from Shopify: one row per product plus one row per compatible printer."""
 import csv
+import html
 import json
 import os
 import re
@@ -123,6 +124,7 @@ def products_query(pub_id):
         f'publishedOnPublication(publicationId: "{pub_id}") '
         "featuredMedia { preview { image { url } } } "
         'mpn: metafield(namespace: "custom", key: "mpn") { value } '
+        'feed_title: metafield(namespace: "custom", key: "feed_title") { value } '
         f"{printer_fields} "
         "variants { edges { node { id sku barcode price inventoryQuantity inventoryPolicy } } } } } } }"
     )
@@ -148,13 +150,45 @@ def make_id(*parts):
     return re.sub(r"[^A-Za-z0-9_.-]", "-", "-".join(parts))[:50]
 
 
-def printer_title(title, printer):
-    full = f"{title} for {printer}"
-    if len(full) <= 150:
-        return full
-    short = re.sub(r"\s*\([^)]*\)\s*$", "", title)
-    full = f"{short} for {printer}"
-    return full if len(full) <= 150 else None
+CMYK_RE = re.compile(r"\bCMYK\s+4\s+Colou?r\b", re.I)
+CAPACITY_RE = re.compile(r"\b(?:(?:Extra|Ultra|Super)\s+)?High\s+Capacity\b", re.I)
+MULTIPACK_RE = re.compile(r"\bMulti-?\s?pack\b", re.I)
+CODE_LIST_RE = re.compile(r"\(([^()]*/[^()]*)\)\s*$")
+
+
+def abbreviate_code(code, previous):
+    common = 0
+    while common < min(len(code), len(previous)) and code[common] == previous[common]:
+        common += 1
+    return code[min(common, max(len(code) - 2, 0)):]
+
+
+def shorten_printer_title(title, printer, brand):
+    """Build '<title> for <printer>' within 150 chars, trimming one step at a time until it fits."""
+    def fits(t, p):
+        return len(f"{t} for {p}") <= 150
+
+    if fits(title, printer):
+        return f"{title} for {printer}"
+    if brand and printer.casefold().startswith(brand.casefold() + " "):
+        printer = printer[len(brand):].strip()
+        if fits(title, printer):
+            return f"{title} for {printer}"
+    for pattern, replacement in ((CMYK_RE, ""), (CAPACITY_RE, ""), (MULTIPACK_RE, "Set")):
+        title = re.sub(r"\s+", " ", pattern.sub(replacement, title)).strip()
+        if fits(title, printer):
+            return f"{title} for {printer}"
+    match = CODE_LIST_RE.search(title)
+    if match:
+        head = title[:match.start()]
+        original = [c.strip() for c in match.group(1).split("/")]
+        codes = list(original)
+        for i in range(len(codes) - 1, 0, -1):
+            codes[i] = abbreviate_code(original[i], original[i - 1])
+            candidate = f"{head}({'/ '.join(codes)})"
+            if fits(candidate, printer):
+                return f"{candidate} for {printer}"
+    return None
 
 
 def tag_value(tags, prefix):
@@ -190,7 +224,7 @@ def build_rows(product_lines, collection_lines):
         else:
             products.append(line)
 
-    rows, stats = [], {"products": 0, "printer_rows": 0, "skipped_no_image": 0, "skipped_long_title": 0, "skipped_missing_printer": 0, "invalid_gtin": 0}
+    rows, stats = [], {"products": 0, "printer_rows": 0, "skipped_no_image": 0, "skipped_long_title": 0, "skipped_missing_printer": 0, "invalid_gtin": 0, "long_titles": []}
     for p in products:
         if not p.get("publishedOnPublication"):
             continue
@@ -220,7 +254,15 @@ def build_rows(product_lines, collection_lines):
         if MAX_PRINTERS:
             printers = printers[:MAX_PRINTERS]
 
-        title = clean(p["title"])[:150]
+        shop_title = clean(p["title"])
+        full_title = clean((p.get("feed_title") or {}).get("value")) or shop_title
+        title = full_title[:150]
+        if len(full_title) > 150:
+            stats["long_titles"].append({
+                "sku": clean(pvars[0].get("sku") or numeric_id(p["id"])), "product": full_title,
+                "printer": "(the product's own title)", "characters": len(full_title),
+                "action": "title cut off at 150 characters",
+            })
         description = clean(p["description"]) or title
         mpn = clean((p.get("mpn") or {}).get("value"))
         tags = p.get("tags") or []
@@ -228,7 +270,7 @@ def build_rows(product_lines, collection_lines):
         cartridge_brand = brand_name(brand_slug) if brand_slug else ""
         product_type_root = {"toner": "Toner Cartridges", "ink": "Ink Cartridges"}.get(tag_value(tags, "type-"), "")
         product_type = " > ".join(x for x in (product_type_root, cartridge_brand) if x)
-        remanufactured = title.casefold().startswith("remanufactured")
+        remanufactured = shop_title.casefold().startswith("remanufactured")
         multi = len(pvars) > 1
         group_id = make_id(pvars[0].get("sku") or numeric_id(p["id"]))
 
@@ -249,7 +291,7 @@ def build_rows(product_lines, collection_lines):
                 "gtin": gtin,
                 "identifier_exists": "" if (mpn or gtin) else "no",
                 "condition": "refurbished" if remanufactured else "new",
-                "is_bundle": "yes" if re.search(r"multi-?\s?pack", title, re.I) else "",
+                "is_bundle": "yes" if re.search(r"multi-?\s?pack", shop_title, re.I) else "",
                 "item_group_id": group_id,
                 "google_product_category": GOOGLE_CATEGORY,
                 "product_type": product_type,
@@ -262,9 +304,10 @@ def build_rows(product_lines, collection_lines):
             })
             stats["products"] += 1
             for name, handle, coll_id in printers:
-                ptitle = printer_title(title, name)
+                ptitle = shorten_printer_title(title, name, cartridge_brand)
                 if not ptitle:
                     stats["skipped_long_title"] += 1
+                    stats["long_titles"].append({"sku": sku, "product": title, "printer": name, "characters": len(f"{title} for {name}"), "action": "printer row left out"})
                     continue
                 short_name = name[len(cartridge_brand):].strip() if cartridge_brand and name.casefold().startswith(cartridge_brand.casefold() + " ") else name
                 rows.append({
@@ -327,6 +370,27 @@ def write_outputs(rows, stats):
         writer.writeheader()
         for r in rows:
             writer.writerow({c: r.get(c, "") for c in COLUMNS})
+    long_titles = stats.get("long_titles", [])
+    with open(os.path.join(OUT_DIR, "needs_attention.csv"), "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["SKU", "Product title", "Printer", "Characters", "Over by (limit 150)", "What happened"])
+        for item in long_titles:
+            writer.writerow([item["sku"], item["product"], item["printer"], item["characters"], item["characters"] - 150, item["action"]])
+    if long_titles:
+        attention = (
+            f"<h2>Needs fixing ({len(long_titles)})</h2>"
+            "<p>These titles are too long even after shortening. To fix one, open the product in Shopify and fill in "
+            "its <b>Feed title</b> field with a shorter version, then run an update. The store's own title stays unchanged. "
+            '<a href="needs_attention.csv">Download the list</a>.</p><ul>'
+            + "".join(
+                f"<li>SKU {html.escape(i['sku'])}: {html.escape(i['product'])} &mdash; for {html.escape(i['printer'])} "
+                f"({i['characters']} characters, <b>over by {i['characters'] - 150}</b>; {html.escape(i['action'])})</li>"
+                for i in long_titles[:50]
+            )
+            + "</ul>"
+        )
+    else:
+        attention = "<p>Nothing needs fixing: every printer title fits.</p>"
     now = datetime.now(timezone.utc)
     built = now.strftime("%Y-%m-%d %H:%M UTC")
     with open(os.path.join(OUT_DIR, "status.json"), "w", encoding="utf-8") as f:
@@ -342,6 +406,7 @@ def write_outputs(rows, stats):
             f"<h1>Feed status</h1><p>Last built: {built}</p>"
             f"<p>{len(rows)} rows ({stats['products']} products, {stats['printer_rows']} printer rows). All checks passed.</p>"
             '<p><a href="feed.txt">feed.txt</a> (for Merchant Center) &middot; <a href="feed.csv">feed.csv</a> (open in Excel)</p>'
+            f"{attention}"
             "<h2>Run an update now</h2>"
             "<ol><li>Click <b>Run an update</b> below.</li>"
             "<li>Click <b>Run workflow</b>, then the green <b>Run workflow</b> button.</li>"
@@ -362,7 +427,11 @@ def main():
     print("Fetching printer collections...")
     collection_lines = shop.bulk(collections_query(pub_id))
     rows, stats = build_rows(product_lines, collection_lines)
-    print(f"Built {len(rows)} rows: {stats}")
+    print(f"Built {len(rows)} rows: { {k: v for k, v in stats.items() if k != 'long_titles'} }")
+    if stats["long_titles"]:
+        print(f"::warning::{len(stats['long_titles'])} titles are too long to fit. See needs_attention.csv on the status page.")
+        for item in stats["long_titles"]:
+            print(f" - SKU {item['sku']} | {item['product']} | for {item['printer']} | {item['characters']} characters, over by {item['characters'] - 150} | {item['action']}")
     problems = find_problems(rows, stats, previous_status())
     if problems:
         print("FEED NOT PUBLISHED - the last good feed stays live. Problems found:")
