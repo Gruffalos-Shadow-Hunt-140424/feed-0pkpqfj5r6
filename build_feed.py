@@ -40,7 +40,7 @@ PRINTER_KEYS = ["compatible_printer_collections"] + [f"compatible_printer_collec
 COLUMNS = [
     "id", "title", "description", "link", "image_link", "availability", "price", "brand", "mpn", "gtin",
     "identifier_exists", "condition", "is_bundle", "item_group_id", "google_product_category", "product_type",
-    "custom_label_0", "custom_label_1", "custom_label_2",
+    "custom_label_0", "custom_label_1", "custom_label_2", "product_highlight",
 ]
 
 
@@ -138,6 +138,8 @@ def products_query(pub_id):
         'mpn: metafield(namespace: "custom", key: "mpn") { value } '
         'feed_title: metafield(namespace: "custom", key: "feed_title") { value } '
         'consumable_type: metafield(namespace: "custom", key: "consumable_type") { value } '
+        'page_yield: metafield(namespace: "custom", key: "page_yield") { value } '
+        'ink_colour: metafield(namespace: "custom", key: "ink_colour") { value } '
         f"{printer_fields} "
         "variants { edges { node { id sku barcode price inventoryQuantity inventoryPolicy } } } } } } }"
     )
@@ -213,6 +215,34 @@ def classify(title, consumable_type):
     if (MAINTENANCE_RE.search(title) and not CARTRIDGE_RE.search(title)) or (consumable_type or "").casefold() == "maintenance":
         return CATEGORY_MAINTENANCE, "Maintenance Kits"
     return CATEGORY_CARTRIDGE, ""
+
+
+def yield_highlight(page_yield, colours):
+    values = [v.strip() for v in (page_yield or "").split("|") if v.strip()]
+    if not values:
+        return ""
+    if any(not v[0].isdigit() for v in values):
+        text = "Approximate yields: " + ", ".join(values)
+        return text if len(text) <= 150 else ""
+    if len(set(values)) == 1:
+        return f"Rated for approximately {values[0]}" + (" per cartridge" if len(values) > 1 else "")
+    if len(values) == len(colours):
+        return "Rated for approximately " + ", ".join(f"{v} ({c})" for c, v in zip(colours, values))
+    return ""
+
+
+def contents_highlight(colours, description, multipack):
+    if multipack:
+        if len(colours) < 2:
+            return ""
+        return f"Includes {len(colours)} cartridges: " + ", ".join(colours[:-1]) + f" and {colours[-1]}"
+    match = re.search(r"This order includes ([^.,]+?)(?:,| rated|\.)", description or "")
+    return f"Includes {match.group(1).strip()}" if match else ""
+
+
+def format_highlights(items):
+    items = [clean(i)[:150] for i in items if i][:6]
+    return ",".join(f'"{i}"' for i in items) if len(items) >= 2 else ""
 
 
 def tag_value(tags, prefix):
@@ -296,6 +326,19 @@ def build_rows(product_lines, collection_lines):
         product_type_root = type_name or {"toner": "Toner Cartridges", "ink": "Ink Cartridges"}.get(tag_value(tags, "type-"), "")
         product_type = " > ".join(x for x in (product_type_root, cartridge_brand) if x)
         remanufactured = shop_title.casefold().startswith("remanufactured")
+        colours = [c for c in re.split(r"\s*\|\s*|,\s+", (p.get("ink_colour") or {}).get("value") or "") if c]
+        is_multipack = bool(re.search(r"multi-?\s?pack", shop_title, re.I))
+        noun = {CATEGORY_DRUM: "drum unit", CATEGORY_REFILL: "toner reload kit", CATEGORY_MAINTENANCE: "maintenance item"}.get(google_category) or (
+            "ink cartridge" if tag_value(tags, "type-") == "ink" else "toner cartridge"
+        )
+        shared_highlights = [
+            f"Remanufactured {noun}" if remanufactured else f"Newly manufactured compatible {noun}",
+            yield_highlight((p.get("page_yield") or {}).get("value"), colours),
+            contents_highlight(colours, p.get("description"), is_multipack),
+            "Won't void your printer's manufacturer warranty",
+            "Chip compatibility guaranteed" if google_category == CATEGORY_CARTRIDGE else "",
+        ]
+        base_compat = f"Suits a wide range of {cartridge_brand} printers" if cartridge_brand else ""
         multi = len(pvars) > 1
         group_id = make_id(pvars[0].get("sku") or numeric_id(p["id"]))
 
@@ -322,6 +365,7 @@ def build_rows(product_lines, collection_lines):
                 "product_type": product_type,
                 "custom_label_0": brand_slug,
                 "custom_label_2": "remanufactured" if remanufactured else "compatible",
+                "product_highlight": format_highlights([base_compat] + shared_highlights),
             }
             rows.append({
                 **common, "id": sku, "title": title, "description": description[:5000],
@@ -338,6 +382,7 @@ def build_rows(product_lines, collection_lines):
                 rows.append({
                     **common, "id": make_id(sku, coll_id), "title": ptitle,
                     "product_type": f"{product_type} > {short_name}" if product_type else short_name,
+                    "product_highlight": format_highlights([f"Compatible with {name}"] + shared_highlights),
                     "description": f"Compatible with {name}. {description}"[:5000],
                     "link": base_link + "?" + "&".join(query + [f"printer={urllib.parse.quote(handle)}"]),
                     "custom_label_1": "printer",
@@ -396,7 +441,7 @@ def write_outputs(rows, stats):
     with open(os.path.join(OUT_DIR, "feed.txt"), "w", encoding="utf-8", newline="") as f:
         f.write("\t".join(COLUMNS) + "\n")
         for r in rows:
-            f.write("\t".join(clean(r.get(c, "")) for c in COLUMNS) + "\n")
+            f.write("\t".join(r.get(c, "") if c == "product_highlight" else clean(r.get(c, "")) for c in COLUMNS) + "\n")
     with open(os.path.join(OUT_DIR, "feed.csv"), "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=COLUMNS)
         writer.writeheader()
