@@ -18,6 +18,8 @@ BRAND = os.environ.get("FEED_BRAND", "MyInkToner")
 MAX_PRINTERS = int(os.environ.get("MAX_PRINTERS_PER_PRODUCT", "0") or 0)  # 0 = all printers
 OUT_DIR = os.environ.get("OUT_DIR", "site")
 MIN_PRODUCTS = int(os.environ.get("MIN_PRODUCTS", "100"))
+MAX_DROP_PCT = float(os.environ.get("MAX_DROP_PCT", "20"))
+REPO = os.environ.get("GITHUB_REPOSITORY", "")
 CURRENCY = "GBP"
 GOOGLE_CATEGORY = "356"  # Electronics > Print, Copy, Scan & Fax > Printer, Copier & Fax Machine Accessories > Printer Consumables > Toner & Inkjet Cartridges
 
@@ -276,6 +278,44 @@ def build_rows(product_lines, collection_lines):
     return rows, stats
 
 
+def previous_status():
+    if "/" not in REPO:
+        return None
+    owner, name = REPO.split("/", 1)
+    try:
+        with urllib.request.urlopen(f"https://{owner.lower()}.github.io/{name}/status.json", timeout=30) as resp:
+            return json.load(resp)
+    except Exception:
+        return None
+
+
+def find_problems(rows, stats, previous):
+    problems = []
+    if stats["products"] < MIN_PRODUCTS:
+        problems.append(f"Only {stats['products']} products found (minimum {MIN_PRODUCTS})")
+    if previous:
+        for label, old, new in (
+            ("Feed rows", previous.get("rows") or 0, len(rows)),
+            ("Products", previous.get("products") or 0, stats["products"]),
+        ):
+            if old and new < old * (1 - MAX_DROP_PCT / 100):
+                problems.append(f"{label} dropped from {old} to {new} (more than {MAX_DROP_PCT:g}% fewer)")
+    if stats["skipped_no_image"] > max(3, stats["products"] * 0.02):
+        problems.append(f"{stats['skipped_no_image']} products were skipped for having no image")
+    skipped = stats["skipped_missing_printer"] + stats["skipped_long_title"]
+    pairs = stats["printer_rows"] + skipped
+    if pairs and skipped / pairs > 0.02:
+        problems.append(f"{skipped} of {pairs} printer links were skipped (more than 2%)")
+    required = ("id", "title", "description", "link", "image_link", "price", "availability", "brand")
+    incomplete = sum(1 for r in rows if any(not r.get(c) for c in required))
+    if incomplete:
+        problems.append(f"{incomplete} rows are missing a required field")
+    ids = [r["id"] for r in rows]
+    if len(set(ids)) != len(ids):
+        problems.append("Some feed ids are duplicated")
+    return problems
+
+
 def write_outputs(rows, stats):
     os.makedirs(OUT_DIR, exist_ok=True)
     with open(os.path.join(OUT_DIR, "feed.txt"), "w", encoding="utf-8", newline="") as f:
@@ -287,14 +327,28 @@ def write_outputs(rows, stats):
         writer.writeheader()
         for r in rows:
             writer.writerow({c: r.get(c, "") for c in COLUMNS})
-    built = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(timezone.utc)
+    built = now.strftime("%Y-%m-%d %H:%M UTC")
+    with open(os.path.join(OUT_DIR, "status.json"), "w", encoding="utf-8") as f:
+        json.dump({"built": now.isoformat(), "rows": len(rows), "products": stats["products"], "printer_rows": stats["printer_rows"]}, f)
+    run_link = (
+        f'<p><a href="https://github.com/{REPO}/actions/workflows/feed.yml"><b>Run an update</b></a> (sign in to GitHub if asked)</p>'
+        if REPO else ""
+    )
     with open(os.path.join(OUT_DIR, "index.html"), "w", encoding="utf-8") as f:
         f.write(
             '<!doctype html><meta charset="utf-8"><meta name="robots" content="noindex,nofollow">'
             "<title>Feed status</title><body style=\"font-family:sans-serif;max-width:40rem;margin:2rem auto\">"
             f"<h1>Feed status</h1><p>Last built: {built}</p>"
-            f"<p>{len(rows)} rows ({stats['products']} products, {stats['printer_rows']} printer rows)</p>"
+            f"<p>{len(rows)} rows ({stats['products']} products, {stats['printer_rows']} printer rows). All checks passed.</p>"
             '<p><a href="feed.txt">feed.txt</a> (for Merchant Center) &middot; <a href="feed.csv">feed.csv</a> (open in Excel)</p>'
+            "<h2>Run an update now</h2>"
+            "<ol><li>Click <b>Run an update</b> below.</li>"
+            "<li>Click <b>Run workflow</b>, then the green <b>Run workflow</b> button.</li>"
+            "<li>Wait a few minutes.</li>"
+            "<li>When it's green, the feed and this page have the new data.</li></ol>"
+            f"{run_link}"
+            "<p>The feed also updates by itself every 3 hours.</p>"
         )
 
 
@@ -309,8 +363,12 @@ def main():
     collection_lines = shop.bulk(collections_query(pub_id))
     rows, stats = build_rows(product_lines, collection_lines)
     print(f"Built {len(rows)} rows: {stats}")
-    if stats["products"] < MIN_PRODUCTS:
-        sys.exit(f"Only {stats['products']} products found (minimum {MIN_PRODUCTS}); refusing to publish a broken feed")
+    problems = find_problems(rows, stats, previous_status())
+    if problems:
+        print("FEED NOT PUBLISHED - the last good feed stays live. Problems found:")
+        for p in problems:
+            print(f" - {p}")
+        sys.exit(1)
     write_outputs(rows, stats)
 
 
