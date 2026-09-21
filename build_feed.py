@@ -38,7 +38,7 @@ CARTRIDGE_RE = re.compile(r"\b(?:toner|ink)\s+cartridges?\b", re.I)
 
 PRINTER_KEYS = ["compatible_printer_collections"] + [f"compatible_printer_collections_{i}" for i in range(2, 9)]
 COLUMNS = [
-    "id", "title", "description", "link", "image_link", "availability", "price", "brand", "color", "mpn", "gtin",
+    "id", "title", "description", "link", "image_link", "availability", "price", "sale_price", "brand", "color", "mpn", "gtin",
     "identifier_exists", "condition", "is_bundle", "item_group_id", "google_product_category", "product_type",
     "custom_label_0", "custom_label_1", "custom_label_2", "product_highlight",
 ]
@@ -141,7 +141,7 @@ def products_query(pub_id):
         'page_yield: metafield(namespace: "custom", key: "page_yield") { value } '
         'ink_colour: metafield(namespace: "custom", key: "ink_colour") { value } '
         f"{printer_fields} "
-        "variants { edges { node { id sku barcode price inventoryQuantity inventoryPolicy } } } } } } }"
+        "variants { edges { node { id sku barcode price compareAtPrice inventoryQuantity inventoryPolicy } } } } } } }"
     )
 
 
@@ -288,7 +288,7 @@ def build_rows(product_lines, collection_lines):
         else:
             products.append(line)
 
-    rows, stats = [], {"products": 0, "printer_rows": 0, "skipped_no_image": 0, "skipped_long_title": 0, "skipped_missing_printer": 0, "invalid_gtin": 0, "long_titles": []}
+    rows, stats = [], {"products": 0, "printer_rows": 0, "skipped_no_image": 0, "skipped_long_title": 0, "skipped_missing_printer": 0, "invalid_gtin": 0, "on_sale": 0, "long_titles": []}
     for p in products:
         if not p.get("publishedOnPublication"):
             continue
@@ -361,10 +361,15 @@ def build_rows(product_lines, collection_lines):
             gtin = valid_gtin(v.get("barcode"))
             if v.get("barcode") and not gtin:
                 stats["invalid_gtin"] += 1
+            # Special price: Shopify's compare-at (was) price becomes Google's `price`, and the current price becomes `sale_price`.
+            current = float(v["price"])
+            compare_at = float(v.get("compareAtPrice") or 0)
+            on_sale = compare_at > current
             common = {
                 "image_link": image["url"],
                 "availability": "in stock" if in_stock else "out of stock",
-                "price": f"{float(v['price']):.2f} {CURRENCY}",
+                "price": f"{(compare_at if on_sale else current):.2f} {CURRENCY}",
+                "sale_price": f"{current:.2f} {CURRENCY}" if on_sale else "",
                 "brand": BRAND,
                 "color": color_value(colours),
                 "mpn": variant_mpn,
@@ -384,6 +389,7 @@ def build_rows(product_lines, collection_lines):
                 "link": base_link + ("?" + "&".join(query) if query else ""), "custom_label_1": "base",
             })
             stats["products"] += 1
+            stats["on_sale"] += 1 if on_sale else 0
             for name, handle, coll_id in printers:
                 ptitle = shorten_printer_title(title, name, cartridge_brand)
                 if not ptitle:
@@ -483,7 +489,7 @@ def write_outputs(rows, stats):
     now = datetime.now(timezone.utc)
     built = london_time(now)
     with open(os.path.join(OUT_DIR, "status.json"), "w", encoding="utf-8") as f:
-        json.dump({"built": now.isoformat(), "rows": len(rows), "products": stats["products"], "printer_rows": stats["printer_rows"]}, f)
+        json.dump({"built": now.isoformat(), "rows": len(rows), "products": stats["products"], "printer_rows": stats["printer_rows"], "on_sale": stats["on_sale"]}, f)
     run_link = (
         f'<p><a href="https://github.com/{REPO}/actions/workflows/feed.yml"><b>Run an update</b></a> (sign in to GitHub if asked)</p>'
         if REPO else ""
@@ -494,6 +500,7 @@ def write_outputs(rows, stats):
             "<title>Feed status</title><body style=\"font-family:sans-serif;max-width:40rem;margin:2rem auto\">"
             f"<h1>Feed status</h1><p>Last built: {built}</p>"
             f"<p>{len(rows)} rows ({stats['products']} products, {stats['printer_rows']} printer rows). All checks passed.</p>"
+            f"<p>Special prices sent to Google (as sale_price): <b>{stats['on_sale']}</b> products.</p>"
             '<p><a href="feed.txt">feed.txt</a> (for Merchant Center) &middot; <a href="feed.csv">feed.csv</a> (open in Excel)</p>'
             f"{attention}"
             "<h2>Run an update now</h2>"
