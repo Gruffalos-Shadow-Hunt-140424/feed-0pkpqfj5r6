@@ -28,6 +28,8 @@ jobs:
           SHOPIFY_SHOP: jtairf-iq.myshopify.com
           SHOPIFY_CLIENT_ID: ${{ secrets.SHOPIFY_CLIENT_ID }}
           SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
+          # "no" = one row per product only (Merchant Center review, 21 Oct 2026). "yes" = also the printer rows.
+          INCLUDE_PRINTER_ROWS: "no"
         run: python build_feed.py
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
