@@ -18,6 +18,9 @@ SITE = os.environ.get("SITE_URL", "https://myinktoner.co.uk").rstrip("/")
 API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2026-04")
 BRAND = os.environ.get("FEED_BRAND", "MyInkToner")
 MAX_PRINTERS = int(os.environ.get("MAX_PRINTERS_PER_PRODUCT", "0") or 0)  # 0 = all printers
+# Switch for the "<product> for <printer>" rows (set in feed.yml). Off (21 Oct 2026) while the new Merchant Center account
+# is reviewed, so Google sees each product once; set INCLUDE_PRINTER_ROWS to yes to put them back.
+INCLUDE_PRINTER_ROWS = os.environ.get("INCLUDE_PRINTER_ROWS", "yes").strip().lower() not in ("no", "false", "0", "off")
 OUT_DIR = os.environ.get("OUT_DIR", "site")
 MIN_PRODUCTS = int(os.environ.get("MIN_PRODUCTS", "100"))
 MAX_DROP_PCT = float(os.environ.get("MAX_DROP_PCT", "20"))
@@ -390,7 +393,7 @@ def build_rows(product_lines, collection_lines):
             })
             stats["products"] += 1
             stats["on_sale"] += 1 if on_sale else 0
-            for name, handle, coll_id in printers:
+            for name, handle, coll_id in (printers if INCLUDE_PRINTER_ROWS else []):
                 ptitle = shorten_printer_title(title, name, cartridge_brand)
                 if not ptitle:
                     stats["skipped_long_title"] += 1
@@ -425,8 +428,11 @@ def find_problems(rows, stats, previous):
     if stats["products"] < MIN_PRODUCTS:
         problems.append(f"Only {stats['products']} products found (minimum {MIN_PRODUCTS})")
     if previous:
+        # the row count is only compared when the printer rows were on (or off) last time too, so switching them
+        # off or back on is not mistaken for a broken build; the product count is always checked
+        same_mode = bool(previous.get("printer_rows")) == bool(stats["printer_rows"])
         for label, old, new in (
-            ("Feed rows", previous.get("rows") or 0, len(rows)),
+            ("Feed rows", (previous.get("rows") or 0) if same_mode else 0, len(rows)),
             ("Products", previous.get("products") or 0, stats["products"]),
         ):
             if old and new < old * (1 - MAX_DROP_PCT / 100):
@@ -500,7 +506,8 @@ def write_outputs(rows, stats):
             "<title>Feed status</title><body style=\"font-family:sans-serif;max-width:40rem;margin:2rem auto\">"
             f"<h1>Feed status</h1><p>Last built: {built}</p>"
             f"<p>{len(rows)} rows ({stats['products']} products, {stats['printer_rows']} printer rows). All checks passed.</p>"
-            f"<p>Special prices sent to Google (as sale_price): <b>{stats['on_sale']}</b> products.</p>"
+            + ("" if INCLUDE_PRINTER_ROWS else "<p>Printer rows are switched off for now (INCLUDE_PRINTER_ROWS in feed.yml).</p>")
+            + f"<p>Special prices sent to Google (as sale_price): <b>{stats['on_sale']}</b> products.</p>"
             '<p><a href="feed.txt">feed.txt</a> (for Merchant Center) &middot; <a href="feed.csv">feed.csv</a> (open in Excel)</p>'
             f"{attention}"
             "<h2>Run an update now</h2>"
