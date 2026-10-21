@@ -441,7 +441,7 @@ def find_problems(rows, stats, previous):
         problems.append(f"{stats['skipped_no_image']} products were skipped for having no image")
     skipped = stats["skipped_missing_printer"] + stats["skipped_long_title"]
     pairs = stats["printer_rows"] + skipped
-    if pairs and skipped / pairs > 0.02:
+    if INCLUDE_PRINTER_ROWS and pairs and skipped / pairs > 0.02:
         problems.append(f"{skipped} of {pairs} printer links were skipped (more than 2%)")
     required = ("id", "title", "description", "link", "image_link", "price", "availability", "brand")
     incomplete = sum(1 for r in rows if any(not r.get(c) for c in required))
