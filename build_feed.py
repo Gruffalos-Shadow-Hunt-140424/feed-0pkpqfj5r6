@@ -181,6 +181,29 @@ def abbreviate_code(code, previous):
     return code[min(common, max(len(code) - 2, 0)):]
 
 
+def shorten_own_title(title, limit=150):
+    """A product's own title within 150 chars (Google's limit): drop 'CMYK 4 Colour' / 'High Capacity', say 'Set' for
+    'Multipack', then shorten the codes in brackets (C13T543100/ C13T543200 -> C13T543100/ 200). Only if that is still
+    too long is it cut, at a word boundary. The title in Shopify is never changed."""
+    if len(title) <= limit:
+        return title
+    for pattern, replacement in ((CMYK_RE, ""), (CAPACITY_RE, ""), (MULTIPACK_RE, "Set")):
+        title = re.sub(r"\s+", " ", pattern.sub(replacement, title)).strip()
+        if len(title) <= limit:
+            return title
+    match = CODE_LIST_RE.search(title)
+    if match:
+        head = title[:match.start()]
+        original = [c.strip() for c in match.group(1).split("/")]
+        codes = list(original)
+        for i in range(len(codes) - 1, 0, -1):
+            codes[i] = abbreviate_code(original[i], original[i - 1])
+            candidate = f"{head}({'/ '.join(codes)})"
+            if len(candidate) <= limit:
+                return candidate
+    return title[:limit].rsplit(" ", 1)[0]
+
+
 def shorten_printer_title(title, printer, brand):
     """Build '<title> for <printer>' within 150 chars, trimming one step at a time until it fits."""
     def fits(t, p):
@@ -323,12 +346,12 @@ def build_rows(product_lines, collection_lines):
 
         shop_title = clean(p["title"])
         full_title = clean((p.get("feed_title") or {}).get("value")) or shop_title
-        title = full_title[:150]
+        title = shorten_own_title(full_title)
         if len(full_title) > 150:
             stats["long_titles"].append({
                 "sku": clean(pvars[0].get("sku") or numeric_id(p["id"])), "product": full_title,
                 "printer": "(the product's own title)", "characters": len(full_title),
-                "action": "title cut off at 150 characters",
+                "action": f"shortened to {len(title)} characters: {title}",
             })
         description = clean(p["description"]) or title
         mpn = clean((p.get("mpn") or {}).get("value"))
