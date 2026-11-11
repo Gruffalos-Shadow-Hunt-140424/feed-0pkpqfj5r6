@@ -141,6 +141,7 @@ def products_query(pub_id):
         'mpn: metafield(namespace: "custom", key: "mpn") { value } '
         'feed_title: metafield(namespace: "custom", key: "feed_title") { value } '
         'consumable_type: metafield(namespace: "custom", key: "consumable_type") { value } '
+        'cartridge_type: metafield(namespace: "custom", key: "cartridge_type") { value } '
         'page_yield: metafield(namespace: "custom", key: "page_yield") { value } '
         'ink_colour: metafield(namespace: "custom", key: "ink_colour") { value } '
         f"{printer_fields} "
@@ -366,7 +367,10 @@ def build_rows(product_lines, collection_lines):
         google_category, type_name = classify(shop_title, (p.get("consumable_type") or {}).get("value"))
         product_type_root = type_name or {"toner": "Toner Cartridges", "ink": "Ink Cartridges"}.get(tag_value(tags, "type-"), "")
         product_type = " > ".join(x for x in (product_type_root, cartridge_brand) if x)
-        remanufactured = shop_title.casefold().startswith("remanufactured")
+        # condition comes from the product's Cartridge type field (11 Nov 2026: reman inks are titled "Compatible" on the
+        # site but are still remanufactured, so Google must get condition = refurbished). Old titles still count too.
+        remanufactured = (((p.get("cartridge_type") or {}).get("value") or "").strip().casefold() == "remanufactured"
+                          or shop_title.casefold().startswith("remanufactured"))
         colours = [c for c in re.split(r"\s*\|\s*|,\s+", (p.get("ink_colour") or {}).get("value") or "") if c]
         is_multipack = bool(re.search(r"multi-?\s?pack", shop_title, re.I))
         noun = {CATEGORY_DRUM: "drum unit", CATEGORY_REFILL: "toner reload kit", CATEGORY_MAINTENANCE: "maintenance item"}.get(google_category) or (
