@@ -314,9 +314,14 @@ def build_rows(product_lines, collection_lines):
         else:
             products.append(line)
 
-    rows, stats = [], {"products": 0, "printer_rows": 0, "skipped_no_image": 0, "skipped_long_title": 0, "skipped_missing_printer": 0, "invalid_gtin": 0, "on_sale": 0, "long_titles": []}
+    rows, stats = [], {"products": 0, "printer_rows": 0, "skipped_no_image": 0, "skipped_long_title": 0, "skipped_missing_printer": 0, "invalid_gtin": 0, "on_sale": 0, "held_back": 0, "long_titles": []}
     for p in products:
         if not p.get("publishedOnPublication"):
+            continue
+        # products tagged "feed-later" are on sale in the shop but held back from Google for now
+        # (new CTS products are released to Google in batches; remove the tag to include a product)
+        if "feed-later" in [t.strip().lower() for t in (p.get("tags") or [])]:
+            stats["held_back"] += 1
             continue
         image = ((p.get("featuredMedia") or {}).get("preview") or {}).get("image") or {}
         if not image.get("url"):
