@@ -377,7 +377,10 @@ def build_rows(product_lines, collection_lines):
             "ink cartridge" if tag_value(tags, "type-") == "ink" else "toner cartridge"
         )
         shared_highlights = [
-            f"Remanufactured {noun}" if remanufactured else f"Newly manufactured compatible {noun}",
+            # retitled remanufactured products (11 Nov 2026) are called "Compatible" on the site; Google still gets
+            # condition = refurbished (see below), so no "newly manufactured" claim is made for them
+            (f"Compatible {noun}" if shop_title.casefold().startswith("compatible") else f"Remanufactured {noun}") if remanufactured
+            else f"Newly manufactured compatible {noun}",
             yield_highlight((p.get("page_yield") or {}).get("value"), colours),
             contents_highlight(colours, p.get("description"), is_multipack),
             "Won't void your printer's manufacturer warranty",
@@ -416,7 +419,7 @@ def build_rows(product_lines, collection_lines):
                 "google_product_category": google_category,
                 "product_type": product_type,
                 "custom_label_0": brand_slug,
-                "custom_label_2": "remanufactured" if remanufactured else "compatible",
+                "custom_label_2": "remanufactured" if (remanufactured and not shop_title.casefold().startswith("compatible")) else "compatible",
                 "product_highlight": format_highlights([base_compat] + shared_highlights),
             }
             rows.append({
